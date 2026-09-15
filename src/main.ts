@@ -16,6 +16,7 @@ import { type Conversation } from './state.js';
 import { DesktopCodexRunner } from './desktop-codex.js';
 import { DesktopSidebar, DesktopSidebarError } from './desktop-sidebar.js';
 import { prepareIncomingInput } from './prepare-input.js';
+import { resolveCodexExecutable } from './codex-executable.js';
 import { loginWeixin, WeixinClient, WeixinApiError, type WeixinCredentials } from './weixin.js';
 
 const timestamp = () => new Date().toISOString();
@@ -129,6 +130,13 @@ async function start(): Promise<void> {
   if (!loadAccounts(RUNTIME).length) throw new Error('尚未绑定微信，请先运行 add-account.cmd。');
   const options = { executable: config.codexExecutable, workingDirectory: config.workingDirectory,
     sandbox: config.sandbox, timeoutMs: config.taskTimeoutMinutes * 60000, model: config.model };
+  const refreshCodexExecutable = () => {
+    const executable = resolveCodexExecutable(options.executable);
+    if (executable !== options.executable) {
+      options.executable = executable;
+      log('已切换到当前安装的 Codex 程序。');
+    }
+  };
   const catalog = new ThreadCatalog(RUNTIME, options);
   const desktop = new DesktopCodexRunner(options);
   const sidebar = new DesktopSidebar(RUNTIME);
@@ -154,6 +162,7 @@ async function start(): Promise<void> {
   }, 1000);
   const title = (context: Pick<AccountContext, 'account'>) => `微信 · ${context.account.label}`;
   const prepare = async (context: Pick<AccountContext, 'account' | 'store'>, conversation: Conversation) => {
+    refreshCodexExecutable();
     if (!conversation.threadId) return;
     const api = await AppServerClient.connect(options);
     try {
@@ -184,6 +193,7 @@ async function start(): Promise<void> {
       createClient: account => new WeixinClient(account.credentials), prepare, log, status: publish,
       prepareInput: (context, job, signal) => prepareIncomingInput(RUNTIME, context.account.id, job, signal),
       run: async (context, input) => {
+        refreshCodexExecutable();
         const runner = new AppServerRunner(options, { onThreadReady: async (id, api) => {
           await catalog.place(api, id, title(context));
           await placeOnDesktop(id);

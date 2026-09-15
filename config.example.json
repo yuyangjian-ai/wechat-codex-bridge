@@ -1,6 +1,6 @@
 {
   "workingDirectory": "D:\\code",
-  "codexExecutable": "C:\\path\\to\\codex.exe",
+  "codexExecutable": "auto",
   "sandbox": "workspace-write",
   "taskTimeoutMinutes": 30,
   "accessControl": {

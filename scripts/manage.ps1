@@ -80,6 +80,60 @@ function Write-BridgeStatus {
     }
 }
 
+function Move-BridgeLogs {
+    # Keep startup failures before Start-Process truncates its redirection files.
+    $bridgeRuntimeFull = [System.IO.Path]::GetFullPath($bridgeRuntime).TrimEnd('\', '/')
+    $bridgeRuntimePrefix = $bridgeRuntimeFull + [System.IO.Path]::DirectorySeparatorChar
+    $bridgeArchiveDirectory = [System.IO.Path]::GetFullPath((Join-Path $bridgeRuntimeFull 'logs'))
+    $bridgeLogPaths = @(
+        (Join-Path $bridgeRuntimeFull 'bridge.stdout.log'),
+        (Join-Path $bridgeRuntimeFull 'bridge.stderr.log')
+    )
+    $bridgePreviousLogs = @()
+    foreach ($bridgeLogPath in $bridgeLogPaths) {
+        if (Test-Path -LiteralPath $bridgeLogPath -PathType Leaf) {
+            $bridgeLogItem = Get-Item -LiteralPath $bridgeLogPath -Force
+            if ($bridgeLogItem.Length -gt 0) { $bridgePreviousLogs += $bridgeLogItem }
+        }
+    }
+    if ($bridgePreviousLogs.Count -eq 0) { return }
+
+    # Reject junctions/symlinks and check every source/destination before moving anything.
+    foreach ($bridgeCheckPath in @($bridgeRuntimeFull, $bridgeArchiveDirectory) + $bridgeLogPaths) {
+        $bridgeCheckFull = [System.IO.Path]::GetFullPath($bridgeCheckPath)
+        if ($bridgeCheckFull -ne $bridgeRuntimeFull -and
+            -not $bridgeCheckFull.StartsWith($bridgeRuntimePrefix, [System.StringComparison]::OrdinalIgnoreCase)) {
+            throw '日志归档路径必须位于 .runtime 目录内。'
+        }
+        if (Test-Path -LiteralPath $bridgeCheckFull) {
+            $bridgeCheckItem = Get-Item -LiteralPath $bridgeCheckFull -Force
+            if (($bridgeCheckItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+                throw '日志路径包含目录联接或符号链接，已取消启动以保留日志。'
+            }
+            $bridgeResolvedFull = [System.IO.Path]::GetFullPath((Resolve-Path -LiteralPath $bridgeCheckFull).ProviderPath).TrimEnd('\', '/')
+            if ($bridgeResolvedFull -ne $bridgeRuntimeFull -and
+                -not $bridgeResolvedFull.StartsWith($bridgeRuntimePrefix, [System.StringComparison]::OrdinalIgnoreCase)) {
+                throw '日志归档解析路径超出 .runtime 目录，已取消启动。'
+            }
+        }
+    }
+    if (-not (Test-Path -LiteralPath $bridgeArchiveDirectory -PathType Container)) {
+        New-Item -ItemType Directory -Path $bridgeArchiveDirectory -ErrorAction Stop | Out-Null
+    }
+    $bridgeLogStamp = [DateTime]::UtcNow.ToString("yyyyMMdd'T'HHmmss.fffffff'Z'")
+    $bridgeLogSuffix = [Guid]::NewGuid().ToString('N').Substring(0, 8)
+    foreach ($bridgePreviousLog in $bridgePreviousLogs) {
+        $bridgeArchiveName = '{0}.{1}.{2}.log' -f $bridgePreviousLog.BaseName, $bridgeLogStamp, $bridgeLogSuffix
+        $bridgeArchivePath = [System.IO.Path]::GetFullPath((Join-Path $bridgeArchiveDirectory $bridgeArchiveName))
+        if (-not $bridgeArchivePath.StartsWith($bridgeRuntimePrefix, [System.StringComparison]::OrdinalIgnoreCase) -or
+            (Test-Path -LiteralPath $bridgeArchivePath)) {
+            throw '日志归档目标无效或已存在，已取消启动以保留日志。'
+        }
+        Move-Item -LiteralPath $bridgePreviousLog.FullName -Destination $bridgeArchivePath -ErrorAction Stop
+    }
+    Write-Host '上次后台日志已保存到 .runtime\logs。'
+}
+
 try {
     $bridgeCurrent = Get-BridgeProcess
 
@@ -132,6 +186,16 @@ try {
     if (-not (Test-Path -LiteralPath $bridgeRuntime -PathType Container)) {
         New-Item -ItemType Directory -Path $bridgeRuntime -Force | Out-Null
     }
+    # Recheck after startup preparation so another confirmed bridge is never rotated here.
+    $bridgeCurrent = Get-BridgeProcess
+    if ($bridgeCurrent.State -eq 'running') {
+        Write-BridgeStatus -BridgeProcess $bridgeCurrent
+        exit 0
+    }
+    if ($bridgeCurrent.State -in @('invalid', 'foreign')) {
+        throw '启动前 PID 状态发生变化，已取消启动并保留现有日志。'
+    }
+    Move-BridgeLogs
     if (Test-Path -LiteralPath $bridgeStopFile -PathType Leaf) {
         Remove-Item -LiteralPath $bridgeStopFile -Force
     }

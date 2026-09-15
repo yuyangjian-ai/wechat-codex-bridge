@@ -16,7 +16,7 @@ npm install
 Copy-Item config.example.json config.json
 ```
 
-编辑 `config.json`，将 `workingDirectory` 改为自己的项目目录，将 `codexExecutable` 改为本机实际的 `codex.exe` 绝对路径（示例中的路径是占位符）。再运行：
+编辑 `config.json`，将 `workingDirectory` 改为自己的项目目录。`codexExecutable` 默认为 `auto`，会从当前 Windows 用户安装的 Codex 桌面程序中查找可用版本；使用其他安装方式时，可填写实际的 `codex.exe` 绝对路径。再运行：
 
 ```powershell
 npm run build
@@ -42,7 +42,9 @@ npm run login
 | `add-account.cmd` | 打开新增账号扫码页面，保留已有绑定 |
 | `accounts.cmd` | 查看已绑定账号的名称和本机编号，不显示登录凭据 |
 
-从其他目录调用时，使用命令文件的完整路径。后台日志位于 `.runtime\bridge.stdout.log` 和 `.runtime\bridge.stderr.log`。
+从其他目录调用时，使用命令文件的完整路径。后台日志位于 `.runtime\bridge.stdout.log` 和 `.runtime\bridge.stderr.log`。重新启动前会将已有非空日志归档到 `.runtime\logs`，保留此前的故障信息。
+
+Codex 更新删除旧版本目录时，桥接会在启动或下一次执行任务前重新查找可用程序。其他自定义路径出错时会明确提示，不会改用未知程序。此机制不负责重启已经退出的桥接进程；进程停止后仍可用 `start.cmd` 启动。
 
 ## 让其他人使用
 

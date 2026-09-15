@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { resolveCodexExecutable } from './codex-executable.js';
 
 export const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 export const RUNTIME = path.join(ROOT, '.runtime');
@@ -19,9 +20,7 @@ export function readConfig(file = path.join(ROOT, 'config.json')): Config {
   if (!path.isAbsolute(config.workingDirectory) || !fs.statSync(config.workingDirectory).isDirectory()) {
     throw new Error('工作目录必须是存在的绝对路径。');
   }
-  if (!path.isAbsolute(config.codexExecutable) || !fs.statSync(config.codexExecutable).isFile()) {
-    throw new Error('codexExecutable 必须指向可用的 Codex 程序。');
-  }
+  config.codexExecutable = resolveCodexExecutable(config.codexExecutable);
   if (!['read-only', 'workspace-write'].includes(config.sandbox)) throw new Error('sandbox 配置无效。');
   if (!Number.isInteger(config.taskTimeoutMinutes) || config.taskTimeoutMinutes < 1 || config.taskTimeoutMinutes > 1440) {
     throw new Error('taskTimeoutMinutes 必须为 1 至 1440。');
