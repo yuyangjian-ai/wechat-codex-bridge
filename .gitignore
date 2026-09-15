@@ -1,0 +1,9 @@
+node_modules/
+dist/
+.runtime/
+output/
+config.json
+.env
+.env.*
+!.env.example
+*.log

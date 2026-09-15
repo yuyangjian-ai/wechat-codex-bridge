@@ -1,0 +1,27 @@
+{
+  "name": "wechat-codex-bridge",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "npm run build && node --test dist/test",
+    "login": "node dist/src/main.js login",
+    "accounts": "node dist/src/main.js accounts",
+    "doctor": "node dist/src/main.js doctor",
+    "start": "node dist/src/main.js start"
+  },
+  "dependencies": {
+    "qrcode": "1.5.4",
+    "sherpa-onnx-node": "1.13.8",
+    "silk-wasm": "3.7.1"
+  },
+  "devDependencies": {
+    "@types/node": "^20.19.0",
+    "@types/qrcode": "^1.5.5",
+    "typescript": "^5.9.3"
+  }
+}
