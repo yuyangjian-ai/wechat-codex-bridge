@@ -134,6 +134,65 @@ function Move-BridgeLogs {
     Write-Host '上次后台日志已保存到 .runtime\logs。'
 }
 
+function Start-BridgeIndependent {
+    param([string]$NodeExecutable)
+
+    $bridgeBootstrap = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot 'start-independent.ps1'))
+    $bridgePowerShell = Join-Path ([System.Environment]::SystemDirectory) 'WindowsPowerShell\v1.0\powershell.exe'
+    if (-not (Test-Path -LiteralPath $bridgeBootstrap -PathType Leaf) -or
+        -not (Test-Path -LiteralPath $bridgePowerShell -PathType Leaf)) {
+        throw '未找到独立启动器或系统 Windows PowerShell。'
+    }
+    $bridgeLaunchId = [Guid]::NewGuid().ToString('N')
+    $bridgeLaunchResult = Join-Path $bridgeRuntime ('start-{0}.json' -f $bridgeLaunchId)
+    $bridgeUserSid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+    $bridgeSessionId = [System.Diagnostics.Process]::GetCurrentProcess().SessionId
+    # WMI Create receives a Windows command line, not a shell expression. All values
+    # are verified absolute file paths or locally generated identifiers; -File does
+    # not evaluate dollar signs, ampersands or single quotes in these arguments.
+    foreach ($bridgeArgument in @($bridgePowerShell, $bridgeBootstrap, $NodeExecutable)) {
+        if (-not [System.IO.Path]::IsPathRooted($bridgeArgument) -or $bridgeArgument -match '["\x00\r\n]') {
+            throw '独立启动路径无效。'
+        }
+    }
+    $bridgeCommandLine = '"{0}" -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -File "{1}" -NodeExecutable "{2}" -LaunchId {3} -ExpectedUserSid {4} -ExpectedSessionId {5}' -f `
+        $bridgePowerShell, $bridgeBootstrap, $NodeExecutable, $bridgeLaunchId, $bridgeUserSid, $bridgeSessionId
+    # Preserve the caller's per-user context in memory only, including CODEX_HOME.
+    # BREAKAWAY_FROM_JOB avoids the WMI provider's Job; NO_WINDOW keeps this hidden.
+    $bridgeEnvironment = @([System.Environment]::GetEnvironmentVariables().GetEnumerator() | ForEach-Object { '{0}={1}' -f $_.Key, $_.Value })
+    try {
+        $bridgeStartup = New-CimInstance -ClassName Win32_ProcessStartup -ClientOnly -Property @{
+            ShowWindow = [uint16]0; CreateFlags = [uint32]0x09000400; EnvironmentVariables = [string[]]$bridgeEnvironment
+        }
+        $bridgeCreated = Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{
+            CommandLine = $bridgeCommandLine; CurrentDirectory = $bridgeRoot; ProcessStartupInformation = $bridgeStartup
+        }
+    }
+    catch { throw 'Windows 独立启动失败；未回退到依附 Codex 的启动方式。' }
+    finally { $bridgeEnvironment = $null; $bridgeStartup = $null }
+    if ($bridgeCreated.ReturnValue -ne 0) {
+        throw ('Windows 独立启动失败（返回码 {0}）；未回退到原启动方式。' -f $bridgeCreated.ReturnValue)
+    }
+    $bridgeLaunchDeadline = [DateTime]::UtcNow.AddSeconds(12)
+    do {
+        if (Test-Path -LiteralPath $bridgeLaunchResult -PathType Leaf) {
+            try { $bridgeResult = [System.IO.File]::ReadAllText($bridgeLaunchResult) | ConvertFrom-Json }
+            catch { throw '独立启动结果无效，请运行 status.cmd 检查。' }
+            finally { Remove-Item -LiteralPath $bridgeLaunchResult -ErrorAction SilentlyContinue }
+            if (-not $bridgeResult.success) { throw '独立启动验证失败，请检查本机启动环境；未回退到原启动方式。' }
+            if (-not $bridgeResult.independent -or $bridgeResult.processId -le 0) { throw '独立启动未确认，已取消启动确认。' }
+            $bridgeVerified = Get-BridgeProcessById -BridgeProcessId $bridgeResult.processId
+            if ($bridgeVerified.State -ne 'running') { throw '独立启动的进程未通过项目归属验证，请检查后台日志。' }
+            return Get-Process -Id $bridgeResult.processId -ErrorAction Stop
+        }
+        Start-Sleep -Milliseconds 100
+    } while ([DateTime]::UtcNow -lt $bridgeLaunchDeadline)
+    throw '独立启动结果尚未确认，请运行 status.cmd 检查；未自动重复启动。'
+}
+
+$bridgeStartMutex = $null
+$bridgeStartMutexHeld = $false
+
 try {
     $bridgeCurrent = Get-BridgeProcess
 
@@ -175,6 +234,16 @@ try {
         exit 1
     }
 
+    # Serialize launchers in this user session, including the log-rotation window.
+    $bridgeHash = [System.Security.Cryptography.SHA256]::Create()
+    try { $bridgeMutexKey = [BitConverter]::ToString($bridgeHash.ComputeHash([System.Text.Encoding]::UTF8.GetBytes($bridgeRoot.ToLowerInvariant()))).Replace('-', '') }
+    finally { $bridgeHash.Dispose() }
+    $bridgeStartMutex = New-Object System.Threading.Mutex($false, ('Local\WeChatCodexBridge.Start.' + $bridgeMutexKey))
+    try { $bridgeStartMutexHeld = $bridgeStartMutex.WaitOne(15000) }
+    catch [System.Threading.AbandonedMutexException] { $bridgeStartMutexHeld = $true }
+    if (-not $bridgeStartMutexHeld) { throw '另一个启动器尚未完成，请稍后运行 status.cmd 检查。' }
+    $bridgeCurrent = Get-BridgeProcess
+    if ($bridgeCurrent.State -in @('invalid', 'foreign')) { throw 'PID 状态发生变化，已取消启动并保留现有日志。' }
     if ($bridgeCurrent.State -eq 'running') {
         Write-BridgeStatus -BridgeProcess $bridgeCurrent
         exit 0
@@ -199,11 +268,7 @@ try {
     if (Test-Path -LiteralPath $bridgeStopFile -PathType Leaf) {
         Remove-Item -LiteralPath $bridgeStopFile -Force
     }
-    $bridgeStartArguments = '"{0}" start' -f $bridgeEntry
-    $bridgeStarted = Start-Process -FilePath $bridgeNode.Source -ArgumentList $bridgeStartArguments `
-        -WorkingDirectory $bridgeRoot -WindowStyle Hidden -PassThru `
-        -RedirectStandardOutput (Join-Path $bridgeRuntime 'bridge.stdout.log') `
-        -RedirectStandardError (Join-Path $bridgeRuntime 'bridge.stderr.log')
+    $bridgeStarted = Start-BridgeIndependent -NodeExecutable $bridgeNode.Source
 
     $bridgeStartDeadline = [DateTime]::UtcNow.AddSeconds(8)
     do {
@@ -226,4 +291,8 @@ try {
 catch {
     Write-Host ('操作失败：{0}' -f $_.Exception.Message)
     exit 1
+}
+finally {
+    if ($bridgeStartMutexHeld) { $bridgeStartMutex.ReleaseMutex() }
+    if ($null -ne $bridgeStartMutex) { $bridgeStartMutex.Dispose() }
 }
